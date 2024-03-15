@@ -3,10 +3,11 @@
 
 #include <chrono>
 #include <string>
+#include <memory>
 
-#include <QEventLoop>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
+#include <QEventLoop>
 
 #include <discord_rpc.h>
 #include <fmt/format.h>
@@ -20,11 +21,30 @@
 
 namespace DiscordRPC {
 
-DiscordImpl::DiscordImpl(Core::System& system_) : system{system_} {
+class DiscordImpl {
+public:
+    DiscordImpl(Core::System& system_);
+    ~DiscordImpl();
+
+    void Pause();
+    void Update();
+
+private:
+    Core::System& system;
+    std::string game_title;
+    std::string game_url;
+
+    void UpdateGameStatus(bool use_default);
+    std::string GetGameString(const std::string& title);
+    void CheckNetworkError(QNetworkReply* reply);
+    
+    std::unique_ptr<QNetworkAccessManager> network_manager;
+};
+
+DiscordImpl::DiscordImpl(Core::System& system_) : system(system_) {
     DiscordEventHandlers handlers{};
-    // The number is the client ID for suyu, it's used for images and the
-    // application name
     Discord_Initialize("712465656758665259", &handlers, 1, nullptr);
+    network_manager = std::make_unique<QNetworkAccessManager>();
 }
 
 DiscordImpl::~DiscordImpl() {
@@ -64,13 +84,12 @@ std::string DiscordImpl::GetGameString(const std::string& title) {
 void DiscordImpl::UpdateGameStatus(bool use_default) {
     const std::string default_text = "suyu is an emulator for the Nintendo Switch";
     const std::string default_image = "suyu_logo";
-    const std::string url = use_default ? default_image : game_url;
     s64 start_time = std::chrono::duration_cast<std::chrono::seconds>(
                          std::chrono::system_clock::now().time_since_epoch())
                          .count();
     DiscordRichPresence presence{};
 
-    presence.largeImageKey = url.c_str();
+    presence.largeImageKey = use_default ? default_image.c_str() : game_url.c_str();
     presence.largeImageText = game_title.c_str();
     presence.smallImageKey = default_image.c_str();
     presence.smallImageText = default_text.c_str();
@@ -80,26 +99,30 @@ void DiscordImpl::UpdateGameStatus(bool use_default) {
     Discord_UpdatePresence(&presence);
 }
 
+void DiscordImpl::CheckNetworkError(QNetworkReply* reply) {
+    if (reply->error() != QNetworkReply::NoError) {
+        // Proper handling of network errors
+    }
+}
+
 void DiscordImpl::Update() {
     const std::string default_text = "suyu is an emulator for the Nintendo Switch";
     const std::string default_image = "suyu_logo";
 
     if (system.IsPoweredOn()) {
         system.GetAppLoader().ReadTitle(game_title);
-
-        // Used to format Icon URL for suyu website game compatibility page
         std::string icon_name = GetGameString(game_title);
         game_url = fmt::format("https://suyu.dev/images/game/boxart/{}.png", icon_name);
 
-        QNetworkAccessManager manager;
-        QNetworkRequest request;
-        request.setUrl(QUrl(QString::fromStdString(game_url)));
+        QNetworkRequest request(QUrl(QString::fromStdString(game_url)));
         request.setTransferTimeout(3000);
-        QNetworkReply* reply = manager.head(request);
+        QNetworkReply* reply = network_manager->head(request);
         QEventLoop request_event_loop;
         QObject::connect(reply, &QNetworkReply::finished, &request_event_loop, &QEventLoop::quit);
         request_event_loop.exec();
+        CheckNetworkError(reply);
         UpdateGameStatus(reply->error());
+        reply->deleteLater();
         return;
     }
 
@@ -114,4 +137,5 @@ void DiscordImpl::Update() {
     presence.startTimestamp = start_time;
     Discord_UpdatePresence(&presence);
 }
+
 } // namespace DiscordRPC
